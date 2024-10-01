@@ -164,48 +164,48 @@ def parse_nmap_results(filepath):
     )
 
 
-# def parse_nikto_results(filepath):
-#     """Parse Nikto scan results."""
-#     findings = []
-#     with open(filepath, "r") as file:
-#         lines = file.readlines()
-#         for line in lines:
-#             if "No web server found" in line:
-#                 findings.append("No web server detected on port 80.")
-#     return findings
 def parse_nikto_results(filepath):
     """Parse Nikto scan results."""
     findings = []
-    start_time = None
-    end_time = None
-    total_tests_run = 0
+    with open(filepath, "r") as file:
+        lines = file.readlines()
+        for line in lines:
+            if "No web server found" in line:
+                findings.append("No web server detected on port 80.")
+    return findings
+# def parse_nikto_results(filepath):
+#     """Parse Nikto scan results."""
+#     findings = []
+#     start_time = None
+#     end_time = None
+#     total_tests_run = 0
 
-    # Parse the XML file
-    tree = ET.parse(filepath)
-    root = tree.getroot()
+#     # Parse the XML file
+#     tree = ET.parse(filepath)
+#     root = tree.getroot()
 
-    # Extract scan start and end times
-    scan_details = root.find("scandetails")
-    if scan_details is not None:
-        # Start time
-        start_time_attr = scan_details.attrib.get("starttime")
-        if start_time_attr:
-            start_time = datetime.strptime(start_time_attr, '%Y-%m-%d %H:%M:%S').strftime('%B %d, %Y %H:%M:%S')
+#     # Extract scan start and end times
+#     scan_details = root.find("scandetails")
+#     if scan_details is not None:
+#         # Start time
+#         start_time_attr = scan_details.attrib.get("starttime")
+#         if start_time_attr:
+#             start_time = datetime.strptime(start_time_attr, '%Y-%m-%d %H:%M:%S').strftime('%B %d, %Y %H:%M:%S')
         
-        # End time
-        end_time_attr = scan_details.attrib.get("endtime")
-        if end_time_attr:
-            end_time = datetime.strptime(end_time_attr, '%Y-%m-%d %H:%M:%S').strftime('%B %d, %Y %H:%M:%S')
+#         # End time
+#         end_time_attr = scan_details.attrib.get("endtime")
+#         if end_time_attr:
+#             end_time = datetime.strptime(end_time_attr, '%Y-%m-%d %H:%M:%S').strftime('%B %d, %Y %H:%M:%S')
 
-    # Extract individual findings
-    for item in root.findall(".//item"):
-        description = item.findtext("description", default="No description")
-        findings.append(description)
+#     # Extract individual findings
+#     for item in root.findall(".//item"):
+#         description = item.findtext("description", default="No description")
+#         findings.append(description)
 
-    # Calculate total tests run
-    total_tests_run = len(root.findall(".//item"))
+#     # Calculate total tests run
+#     total_tests_run = len(root.findall(".//item"))
 
-    return findings, start_time, end_time, total_tests_run
+#     return findings, start_time, end_time, total_tests_run
 
 def generate_report(nmap_results, nikto_results, report_filepath):
     """Generate a structured PDF report based on scan results."""
@@ -220,7 +220,8 @@ def generate_report(nmap_results, nikto_results, report_filepath):
         end_time,
         total_ports_scanned,
     ) = nmap_results
-    nikto_findings,nikto_start_time,nikto_end_time,total_tests_run = nikto_results
+    nikto_findings = nikto_results
+    # nikto_findings,nikto_start_time,nikto_end_time,total_tests_run = nikto_results
 
     doc = SimpleDocTemplate(report_filepath, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -330,45 +331,45 @@ def generate_report(nmap_results, nikto_results, report_filepath):
     #         normal_style,
     #     )
     # )
-    # content.append(Paragraph("Target Port: 80", normal_style))
-    # content.append(Paragraph("Server Detected: N/A", normal_style))
+    content.append(Paragraph("Target Port: 80", normal_style))
+    content.append(Paragraph("Server Detected: N/A", normal_style))
 
-    # # Nikto Findings
-    # if nikto_findings:
-    #     content.append(Paragraph("Findings:", normal_style))
-    #     table_data = [[finding] for finding in nikto_findings]
-    #     table = Table(table_data, colWidths=[doc.width / 2.0])
-    #     table.setStyle(
-    #         TableStyle(
-    #             [
-    #                 ("BACKGROUND", (0, 0), (-1, 0), "#f0f0f0"),
-    #                 ("TEXTCOLOR", (0, 0), (-1, 0), "#000000"),
-    #                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-    #                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    #                 ("GRID", (0, 0), (-1, -1), 1, "#d0d0d0"),
-    #             ]
-    #         )
-    #     )
-    #     content.append(table)
-    # Add scan start and end times from Nikto
-    if nikto_start_time:
-        content.append(
-            Paragraph(f"Nikto Scan Start Time: {nikto_start_time}", normal_style)
-        )
-    if nikto_end_time:
-        content.append(
-            Paragraph(f"Nikto Scan End Time: {nikto_end_time}", normal_style)
-        )
-    if total_tests_run:
-        content.append(
-            Paragraph(f"Total Tests Run: {total_tests_run}", normal_style)
-        )
-
-    # Web Application Security Section
+    # Nikto Findings
     if nikto_findings:
-        content.append(Paragraph(f"3.{section_counter} Web Application Security", section_heading_style))
-        for finding in nikto_findings:
-            content.append(Paragraph(f"- {finding}", normal_style))
+        content.append(Paragraph("Findings:", normal_style))
+        table_data = [[finding] for finding in nikto_findings]
+        table = Table(table_data, colWidths=[doc.width / 2.0])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), "#f0f0f0"),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), "#000000"),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 1, "#d0d0d0"),
+                ]
+            )
+        )
+        content.append(table)
+    # Add scan start and end times from Nikto
+    # if nikto_start_time:
+    #     content.append(
+    #         Paragraph(f"Nikto Scan Start Time: {nikto_start_time}", normal_style)
+    #     )
+    # if nikto_end_time:
+    #     content.append(
+    #         Paragraph(f"Nikto Scan End Time: {nikto_end_time}", normal_style)
+    #     )
+    # if total_tests_run:
+    #     content.append(
+    #         Paragraph(f"Total Tests Run: {total_tests_run}", normal_style)
+    #     )
+
+    # # Web Application Security Section
+    # if nikto_findings:
+    #     content.append(Paragraph(f"3.{section_counter} Web Application Security", section_heading_style))
+    #     for finding in nikto_findings:
+    #         content.append(Paragraph(f"- {finding}", normal_style))
 
     # Vulnerability Assessment Section (dynamic part)
     open_ports_assessments = {
@@ -411,7 +412,7 @@ def generate_report(nmap_results, nikto_results, report_filepath):
     }
 
     # Vulnerability Assessment
-
+    content.append(Paragraph(" ", section_heading_style)) # for spacing before new section
     content.append(Paragraph("3. Vulnerability Assessment", heading_style))
     section_counter = 1  # Start numbering for subsections
 
@@ -498,6 +499,7 @@ def generate_report(nmap_results, nikto_results, report_filepath):
     #     )
 
     # Conclusion
+    content.append(Paragraph(" ", section_heading_style)) # for spacing before new section
     content.append(Paragraph("4. Conclusion", heading_style))
     content.append(
         Paragraph(
@@ -507,6 +509,7 @@ def generate_report(nmap_results, nikto_results, report_filepath):
     )
 
     # Appendices
+    content.append(Paragraph(" ", section_heading_style)) # for spacing before new section
     content.append(Paragraph("5. Appendices", heading_style))
     content.append(Paragraph("5.1 Tools Used", section_heading_style))
     content.append(
