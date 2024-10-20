@@ -28,14 +28,16 @@ except Exception as e:
 
 # Run Nmap Scan
 try:
-    nmap_command = f"nmap -sV -oX {output_dir}/nmap_output.xml -Pn {ip_address}"
+    # nmap_command = f"nmap -sV -oX {output_dir}/nmap_output.xml -Pn {ip_address}"
+    nmap_command = f"nmap -sV -oX {output_dir}/nmap_output.xml -Pn 192.168.1.14 43.205.151.144"
     os.system(nmap_command)
 except Exception as e:
     print(f"Error running Nmap: {e}")
 
 # Run Nikto Scan
 try:
-    nikto_command = f"nikto -h http://{ip_address} -o {output_dir}/nikto_output.xml"
+    # nikto_command = f"nikto -h http://{ip_address} -o {output_dir}/nikto_output.xml"
+    nikto_command = f"nikto -h http://{ip_address} -o {output_dir}/nikto_output.xml -Tuning 0"
     os.system(nikto_command)
 except Exception as e:
     print(f"Error running Nikto: {e}")
