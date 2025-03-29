@@ -1,7 +1,7 @@
-# Automated Detection and Security Assessment (ADSA)
+# ScanPulse: Automated Detection and Security Assessment tool 
 ### 
 
-This project automates the process of generating a Vulnerability Assessment and Penetration Testing (VAPT) report by parsing Nmap and Nikto scan results and creating a professional PDF report. The tool extracts important details such as open and filtered ports, services, vulnerabilities, and recommendations, and formats them into a well-structured report using the `reportlab` library.
+ScanPulse automates the process of generating a Vulnerability Assessment and Penetration Testing (VAPT) report by parsing Nmap and Nikto scan results and creating a professional PDF report. The tool extracts important details such as open and filtered ports, services, vulnerabilities, and recommendations, and formats them into a well-structured report using the `reportlab` library.
 
 #### Key Features:
 - **Nmap and Nikto Parsing**: Extracts open ports, services, and vulnerabilities.
