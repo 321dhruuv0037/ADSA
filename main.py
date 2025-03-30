@@ -20,6 +20,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import re
 import base64
+from dotenv import load_dotenv
+import requests
+import ipaddress
 
 # Create necessary directories
 if not os.path.exists("reports"):
@@ -46,6 +49,19 @@ logger = ThreadSafeLogger()
 def run_nmap_scan(network, output_dir):
     # Generate a file name that includes the target IP
     nmap_output = os.path.join(output_dir, f"nmap_output_{network.replace('/', '_').replace('.', '_')}.xml")
+    # Updated command using the vulners script to capture CVE data
+    nmap_command = f"nmap -sV --script vulners -oX \"{nmap_output}\" {network}"
+    try:
+        result = subprocess.run(nmap_command, shell=True, check=True, capture_output=True, text=True)
+        logger.log(f"Nmap scan (with vulners) completed for {network}")
+        return nmap_output
+    except subprocess.CalledProcessError as e:
+        logger.log(f"Error running Nmap for {network}: {str(e)}")
+        return None
+
+def run_nmap_scan1(network, output_dir):
+    # Generate a file name that includes the target IP
+    nmap_output = os.path.join(output_dir, f"nmap_output_{network.replace('/', '_').replace('.', '_')}.xml")
     nmap_command = f"nmap -sV -oX \"{nmap_output}\" {network}"
     try:
         result = subprocess.run(nmap_command, shell=True, check=True, capture_output=True, text=True)
@@ -68,19 +84,6 @@ def run_nikto_scan(ip_address, output_dir):
         return None
 
 
-# Function to run Nmap scan
-def run_nmap_scan1(network, output_dir):
-    #nmap_output = os.path.join(output_dir, f"nmap_output_{network.replace('/', '_').replace('.', '_')}.xml")
-
-    nmap_output = os.path.join(output_dir, f"nmap_output.xml")
-    nmap_command = f"nmap -sV -oX \"{nmap_output}\" {network}"
-    try:
-        result = subprocess.run(nmap_command, shell=True, check=True, capture_output=True, text=True)
-        logger.log(f"Nmap scan completed for {network}")
-        return nmap_output
-    except subprocess.CalledProcessError as e:
-        logger.log(f"Error running Nmap for {network}: {str(e)}")
-        return None
 
 # Function to run Nikto scan
 def run_nikto_scan1(ip_address, output_dir):
@@ -96,39 +99,90 @@ def run_nikto_scan1(ip_address, output_dir):
         logger.log(f"Error running Nikto for {ip_address}: {str(e)}")
         return None
 
-# Parallel scan execution function
-# def execute_scans(networks, output_dir, run_nmap, run_nikto):
-#     scan_results = []
+def save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings, cvss_data_dict):
+    """
+    Save IP details to a JSON file in the ipaddr directory with consistent formatting.
+    This version also saves CVSS data including:
+      - Total vulnerabilities found
+      - Level-wise vulnerability counts
+      - An overall vulnerability level
+    """
+    # Process Nikto findings for web vulnerabilities
+    if nikto_findings:
+        vulnerabilities = [str(finding) for finding in nikto_findings if finding]  # Ensure all findings are captured
+    else:
+        vulnerabilities = []
+
+    # Calculate CVSS metrics based on cvss_data_dict
+    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    for info in cvss_data_dict.values():
+        if info is not None:
+            sev = info.get("baseSeverity", "INFO").upper()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+            else:
+                severity_counts[sev] = 1
+        else:
+            severity_counts["INFO"] += 1
+    total_vulnerabilities = sum(severity_counts.values())
     
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-#         futures = []
-        
-#         # Nmap scan futures
-#         if run_nmap:
-#             nmap_futures = [
-#                 executor.submit(run_nmap_scan, network, output_dir) 
-#                 for network in networks
-#             ]
-#             futures.extend(nmap_futures)
-        
-#         # Nikto scan futures
-#         if run_nikto:
-#             nikto_futures = [
-#                 executor.submit(run_nikto_scan, network, output_dir) 
-#                 for network in networks
-#             ]
-#             futures.extend(nikto_futures)
-        
-#         # Collect results as they complete
-#         for future in concurrent.futures.as_completed(futures):
-#             result = future.result()
-#             if result:
-#                 scan_results.append(result)
+    # Compute overall vulnerability level: highest severity found
+    overall_level = "None"
+    if total_vulnerabilities > 0:
+        if severity_counts["CRITICAL"] > 0:
+            overall_level = "CRITICAL"
+        elif severity_counts["HIGH"] > 0:
+            overall_level = "HIGH"
+        elif severity_counts["MEDIUM"] > 0:
+            overall_level = "MEDIUM"
+        elif severity_counts["LOW"] > 0:
+            overall_level = "LOW"
+        else:
+            overall_level = "INFO"
+
+    ip_data = {
+        "timestamp": datetime.now().isoformat(),  # ISO 8601 format
+        "ip_address": str(target_ip),
+        "open_ports": [
+            {"port": str(port), "service": str(service)} 
+            for port, service in open_ports
+        ],
+        "filtered_ports": [
+            {"port": str(port), "service": str(service)} 
+            for port, service in filtered_ports
+        ],
+        "web_vulnerabilities": [str(finding) for finding in vulnerabilities if finding],
+        "cvss_data": {
+            "total_vulnerabilities": total_vulnerabilities,
+            "severity_counts": severity_counts,
+            "overall_vulnerability_level": overall_level
+        }
+    }
+
+    base_filename = os.path.join("ipaddr", f"{target_ip.replace('.', '_')}_details.json")
     
-#     return scan_results
+    try:
+        if os.path.exists(base_filename):
+            with open(base_filename, 'r') as f:
+                try:
+                    existing_data = json.load(f)
+                    if not isinstance(existing_data, list):
+                        existing_data = [existing_data]
+                except json.JSONDecodeError:
+                    existing_data = []
+        else:
+            existing_data = []
+    
+        existing_data.append(ip_data)
+        
+        with open(base_filename, 'w') as f:
+            json.dump(existing_data, f, indent=4)
+    
+    except IOError as e:
+        st.error(f"Error saving IP details: {e}")
 
 
-def save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings):
+def save_ip_details1(target_ip, open_ports, filtered_ports, nikto_findings):
     """
     Save IP details to a JSON file in the ipaddr directory with consistent formatting.
     """
@@ -178,54 +232,77 @@ def save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings):
         st.error(f"Error saving IP details: {e}")
 
 
-def save_ip_details1(target_ip, open_ports, filtered_ports, nikto_findings):
-    """
-    Save IP details to a JSON file in the ipaddr directory with consistent formatting
-    """
-    # Ensure that web vulnerabilities are stored as full strings
-    vulnerabilities = nikto_findings[0]
-    if isinstance(vulnerabilities, str):
-        vulnerabilities = [vulnerabilities]
-
-    ip_data = {
-        "timestamp": datetime.now().isoformat(),  # Ensure ISO 8601 format
-        "ip_address": str(target_ip),
-        "open_ports": [
-            {"port": str(port), "service": str(service)} 
-            for port, service in open_ports
-        ],
-        "filtered_ports": [
-            {"port": str(port), "service": str(service)} 
-            for port, service in filtered_ports
-        ],
-        "web_vulnerabilities": [str(finding) for finding in vulnerabilities if finding]
-    }
-
-    base_filename = os.path.join("ipaddr", f"{target_ip.replace('.', '_')}_details.json")
-    
-    try:
-        if os.path.exists(base_filename):
-            with open(base_filename, 'r') as f:
-                try:
-                    existing_data = json.load(f)
-                    if not isinstance(existing_data, list):
-                        existing_data = [existing_data]
-                except json.JSONDecodeError:
-                    existing_data = []
-        else:
-            existing_data = []
-    
-        existing_data.append(ip_data)
-        
-        with open(base_filename, 'w') as f:
-            json.dump(existing_data, f, indent=4)
-    
-    except IOError as e:
-        st.error(f"Error saving IP details: {e}")
-
-
-
 def get_all_ip_scan_details():
+    """
+    Retrieve the most recent scan details for all IP addresses with error handling.
+    
+    Returns:
+        list: Most recent scan details for each IP address, including CVSS data.
+    """
+    ip_details = []
+    
+    # Check if ipaddr directory exists
+    if not os.path.exists("ipaddr"):
+        st.warning("IP address details directory not found.")
+        return ip_details
+
+    # Check if directory is empty
+    ip_files = [f for f in os.listdir("ipaddr") if f.endswith("_details.json")]
+    
+    if not ip_files:
+        st.info("No IP scan details found. Run a scan to generate details.")
+        return ip_details
+
+    # Process each JSON file
+    for filename in ip_files:
+        filepath = os.path.join("ipaddr", filename)
+        try:
+            with open(filepath, 'r') as f:
+                file_content = f.read().strip()
+                
+                # Check if file is empty
+                if not file_content:
+                    st.warning(f"Empty file found: {filename}")
+                    continue
+                
+                # Attempt to parse JSON
+                try:
+                    all_ip_data = json.loads(file_content)
+                    
+                    # Get the most recent scan (last item in the list)
+                    if all_ip_data and isinstance(all_ip_data, list):
+                        latest_ip_data = all_ip_data[-1]
+                        
+                        # If cvss_data key is missing, add a default structure
+                        if "cvss_data" not in latest_ip_data:
+                            latest_ip_data["cvss_data"] = {
+                                "total_vulnerabilities": 0,
+                                "severity_counts": {
+                                    "CRITICAL": 0,
+                                    "HIGH": 0,
+                                    "MEDIUM": 0,
+                                    "LOW": 0,
+                                    "INFO": 0
+                                },
+                                "overall_vulnerability_level": "N/A"
+                            }
+                        
+                        # Validate the structure of the JSON
+                        required_keys = ['ip_address', 'open_ports', 'filtered_ports', 'web_vulnerabilities', 'cvss_data']
+                        if all(key in latest_ip_data for key in required_keys):
+                            ip_details.append(latest_ip_data)
+                        else:
+                            st.warning(f"Incomplete data in file: {filename}")
+                
+                except json.JSONDecodeError:
+                    st.error(f"JSON decoding error in file: {filename}")
+        
+        except IOError as e:
+            st.error(f"Error reading file {filename}: {e}")
+    
+    return ip_details
+
+def get_all_ip_scan_details1():
     """
     Retrieve the most recent scan details for all IP addresses with error handling
     
@@ -415,78 +492,8 @@ def parse_nikto_results(filepath):
     return findings, start_time, target_ip, hostname, target_port, web_server, total_tests_run, elapsed_time_attr
 
 
-def parse_nikto_results1(filepath):
-    """Parse Nikto scan results using lxml."""
-    findings = []
-    start_time = None
-    total_tests_run = 0
-    target_ip = None
-    hostname = None
-    target_port = None
-    web_server = None
-    elapsed_time_attr = "No elapsed time"
 
-    try:
-        # Read the file content
-        with open(filepath, 'r') as file:
-            content = file.read()
-
-        # Replace newlines and separate multiple niktoscan elements
-        content = content.replace('\n', '')
-        scan_details = content.split('<niktoscan')[1:]  # Skip the first split part before the first <niktoscan>
-
-        # Check if there are any scan details
-        if not scan_details:
-            print("No <niktoscan> elements found in the XML.")
-            return [], None, None, None, None, None, 0, elapsed_time_attr
-
-        # Process only the last niktoscan result
-        last_scan_info = '<niktoscan' + scan_details[-1]  # Get the last niktoscan details
-        last_scan_info = last_scan_info.split('>')[0] + '>' + last_scan_info.split('>', 1)[1]  # Reconstruct it properly
-
-        # Parse the last scan result
-        root = etree.fromstring(last_scan_info)
-
-        # Extract the last scan details
-        last_scandetails = root.find("scandetails")
-
-        # Ensure the child element exists before accessing it
-        if last_scandetails is not None:
-            # Extract scan start time
-            start_time_attr = last_scandetails.attrib.get("starttime")
-            if start_time_attr:
-                start_time = datetime.strptime(start_time_attr, '%Y-%m-%d %H:%M:%S').strftime('%B %d, %Y %H:%M:%S')
-
-            # Extract target information
-            target_ip = last_scandetails.attrib.get("targetip", "No IP")
-            hostname = last_scandetails.attrib.get("targethostname", "No Hostname")
-            target_port = last_scandetails.attrib.get("targetport", "No Port")
-            web_server = last_scandetails.attrib.get("targetbanner", "No Web Server")
-
-            # Extract individual findings
-            for item in last_scandetails.findall("item"):
-                description = item.findtext("description", default="No description")
-                findings.append(description)
-
-            # Calculate total tests run
-            total_tests_run = len(last_scandetails.findall("item"))
-
-            # Extract elapsed time if available
-            elapsed_time_attr = last_scandetails.attrib.get("elapsed", "No elapsed time")
-        else:
-            print("No <scandetails> found in the last <niktoscan> element.")
-            return [], None, None, None, None, None, 0, elapsed_time_attr
-
-    except etree.XMLSyntaxError as e:
-        print(f"Error parsing the Nikto XML file: {e}")
-        return [], None, None, None, None, None, 0, elapsed_time_attr
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return [], None, None, None, None, None, 0, elapsed_time_attr
-
-    return findings, start_time, target_ip, hostname, target_port, web_server, total_tests_run, elapsed_time_attr
-
-def execute_scans(networks, output_dir, run_nmap, run_nikto):
+def execute_scans1(networks, output_dir, run_nmap, run_nikto):
     scan_results = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(networks)) as executor:
@@ -512,6 +519,216 @@ def execute_scans(networks, output_dir, run_nmap, run_nikto):
 
     return report_paths
 
+import math
+import time
+import concurrent.futures
+
+def execute_scans(networks, output_dir, run_nmap, run_nikto, batch_size=10):
+    """
+    Execute scans in batches, with a maximum of batch_size tasks running per batch.
+    Nmap is always run.
+    """
+    scan_results = {}
+    total_networks = len(networks)
+    batches = math.ceil(total_networks / batch_size)
+    
+    for b in range(batches):
+        batch_networks = networks[b * batch_size:(b + 1) * batch_size]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = {}
+            # Submit tasks for the current batch
+            for network in batch_networks:
+                futures[executor.submit(run_nmap_scan, network, output_dir)] = network
+                if run_nikto:
+                    futures[executor.submit(run_nikto_scan, network, output_dir)] = network
+
+            # Wait for all futures in this batch to complete
+            for future in concurrent.futures.as_completed(futures):
+                ip = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        scan_results[ip] = result
+                except Exception as e:
+                    print(f"Error scanning {ip}: {e}")
+                    
+        # Optionally, add a delay between batches if needed
+        # time.sleep(1)
+    # After all batches are done, generate reports for each IP as needed.
+    report_paths = []
+    for ip in scan_results.keys():
+        report_path = generate_report(output_dir, run_nmap, run_nikto, ip)
+        report_paths.append(report_path)
+    return report_paths
+
+def get_cvss_data(cve_id):
+    load_dotenv()  # loads variables from .env into the environment
+    API_KEY = os.getenv("API_KEY")
+    url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+    try:
+        headers = {"apiKey": API_KEY}  # Use your NVD API key here
+        response = requests.get(url, headers=headers, timeout=10)
+    except requests.exceptions.RequestException as e:
+        print(f"Request error for {cve_id}: {e}")
+        return None
+
+    if response.status_code == 200:
+        data = response.json()
+        try:
+            vulnerabilities = data.get("vulnerabilities", [])
+            if vulnerabilities:
+                vuln = vulnerabilities[0]
+                cve_info = vuln.get("cve", {})
+                metrics = cve_info.get("metrics", {})
+                # Extract remediation information from NVD references:
+                references = cve_info.get("references", [])
+                remediation_info = []
+                for ref in references:
+                    ref_url = ref.get("url", "")
+                    # Look for patch or update hints in the URL text
+                    if "patch" in ref_url.lower() or "update" in ref_url.lower():
+                        remediation_info.append(ref_url)
+                remediation = "; ".join(remediation_info) if remediation_info else (
+                    "Vendor Remediation: Update to the latest version as per vendor advisory."
+                )
+                # Try CVSS v3.1 first
+                if "cvssMetricV31" in metrics:
+                    cvss_data = metrics["cvssMetricV31"][0]["cvssData"]
+                    descriptions = cve_info.get("descriptions", [])
+                    eng_desc = next((d.get("value") for d in descriptions if d.get("lang")=="en"), "N/A")
+                    return {
+                        "baseScore": cvss_data.get("baseScore"),
+                        "baseSeverity": cvss_data.get("baseSeverity"),
+                        "attackVector": cvss_data.get("attackVector"),
+                        "privilegesRequired": cvss_data.get("privilegesRequired"),
+                        "confidentialityImpact": cvss_data.get("confidentialityImpact"),
+                        "integrityImpact": cvss_data.get("integrityImpact"),
+                        "availabilityImpact": cvss_data.get("availabilityImpact"),
+                        "vectorString": cvss_data.get("vectorString"),
+                        "description": eng_desc,
+                        "remediation": remediation,
+                        "exploitabilityScore": metrics["cvssMetricV31"][0].get("exploitabilityScore"),
+                        "impactScore": metrics["cvssMetricV31"][0].get("impactScore")
+                    }
+                elif "cvssMetricV30" in metrics:
+                    cvss_data = metrics["cvssMetricV30"][0]["cvssData"]
+                    descriptions = cve_info.get("descriptions", [])
+                    eng_desc = next((d.get("value") for d in descriptions if d.get("lang")=="en"), "N/A")
+                    return {
+                        "baseScore": cvss_data.get("baseScore"),
+                        "baseSeverity": cvss_data.get("baseSeverity"),
+                        "attackVector": cvss_data.get("attackVector"),
+                        "privilegesRequired": cvss_data.get("privilegesRequired"),
+                        "confidentialityImpact": cvss_data.get("confidentialityImpact"),
+                        "integrityImpact": cvss_data.get("integrityImpact"),
+                        "availabilityImpact": cvss_data.get("availabilityImpact"),
+                        "vectorString": cvss_data.get("vectorString"),
+                        "description": eng_desc,
+                        "remediation": remediation,
+                        "exploitabilityScore": metrics["cvssMetricV30"][0].get("exploitabilityScore"),
+                        "impactScore": metrics["cvssMetricV30"][0].get("impactScore")
+                    }
+                elif "cvssMetricV2" in metrics:
+                    cvss_data = metrics["cvssMetricV2"][0]["cvssData"]
+                    descriptions = cve_info.get("descriptions", [])
+                    eng_desc = next((d.get("value") for d in descriptions if d.get("lang")=="en"), "N/A")
+                    return {
+                        "baseScore": cvss_data.get("baseScore"),
+                        "baseSeverity": metrics["cvssMetricV2"][0].get("baseSeverity"),
+                        "attackVector": cvss_data.get("accessVector"),
+                        "privilegesRequired": cvss_data.get("authentication"),
+                        "confidentialityImpact": cvss_data.get("confidentialityImpact"),
+                        "integrityImpact": cvss_data.get("integrityImpact"),
+                        "availabilityImpact": cvss_data.get("availabilityImpact"),
+                        "vectorString": cvss_data.get("vectorString"),
+                        "description": eng_desc,
+                        "remediation": remediation,
+                        "exploitabilityScore": metrics["cvssMetricV2"][0].get("exploitabilityScore"),
+                        "impactScore": metrics["cvssMetricV2"][0].get("impactScore")
+                    }
+            else:
+                print(f"No vulnerabilities found for {cve_id}")
+                return None
+        except Exception as e:
+            print(f"Error parsing metrics for {cve_id}: {e}")
+            return None
+    else:
+        print(f"Error fetching {cve_id}: HTTP {response.status_code}")
+        return None
+
+def extract_cves_nmap(xml_file):
+    cve_list = set()
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        for elem in root.findall(".//script"):
+            if "output" in elem.attrib:
+                cves = re.findall(r'CVE-\d{4}-\d+', elem.attrib["output"])
+                cve_list.update(cves)
+    except Exception as e:
+        print(f"Error parsing Nmap XML: {e}")
+    return list(cve_list)
+
+from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.lib import colors
+
+def create_severity_pie_chart(severity_counts):
+    """
+    Create a vibrant pie chart with a legend (without text over the pie).
+    The legend shows each severity label with its count.
+    Example: {"CRITICAL": 1, "HIGH": 3, "MEDIUM": 2, "LOW": 0, "INFO": 5}
+    """
+    # Increase drawing size to make room for legend
+    drawing = Drawing(500, 250)
+    pie = Pie()
+    pie.x = 100
+    pie.y = 50
+    pie.width = 150
+    pie.height = 150
+
+    # Use only values for the pie (no internal labels)
+    labels = list(severity_counts.keys())
+    values = list(severity_counts.values())
+    pie.data = values
+    pie.labels = []  # Remove text labels from the pie chart
+
+    # Use your custom vibrant colors
+    vibrant_colors = {
+        "CRITICAL": colors.HexColor("#ed1c24"),  # red
+        "HIGH": colors.HexColor("#ff7f27"),       # orange
+        "MEDIUM": colors.HexColor("#fff200"),      # yellow
+        "LOW": colors.HexColor("#22b14c"),         # green
+        "INFO": colors.HexColor("#d7e2e6")         # grey
+    }
+
+    
+    # Assign colors to slices based on severity label order
+    for i, label in enumerate(labels):
+        if label in vibrant_colors:
+            if i < len(pie.slices):
+                pie.slices[i].fillColor = vibrant_colors[label]
+        else:
+            if i < len(pie.slices):
+                pie.slices[i].fillColor = colors.grey
+
+    drawing.add(pie)
+
+    # Add a manual legend with the count for each category.
+    legend_x = 300
+    legend_y = 170
+    box_size = 10
+    spacing = 15
+    for i, label in enumerate(labels):
+        # Draw a colored box for the legend
+        legend_box = Rect(legend_x, legend_y - i * spacing, box_size, box_size, fillColor=vibrant_colors.get(label, colors.grey))
+        drawing.add(legend_box)
+        # Add label text with count next to the box
+        count = severity_counts.get(label, 0)
+        legend_text = String(legend_x + box_size + 5, legend_y - i * spacing, f"{label}: {count}", fontSize=10)
+        drawing.add(legend_text)
+        
+    return drawing
 
 def generate_report(output_dir, run_nmap, run_nikto, target_ip):
     """Enhanced report generation for a specific target IP with dynamic section numbering.
@@ -563,8 +780,13 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
         total_tests_run = None
         elapsed_time = None
 
+    # Extract CVE IDs from the Nmap XML file (assumes nmap_file exists)
+    all_cves = extract_cves_nmap(nmap_file)
+    # Build a CVSS data dictionary for each CVE
+    cvss_data_dict = {cve: get_cvss_data(cve) for cve in all_cves}
+
     # Save IP details (even if empty)
-    save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings)
+    save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings, cvss_data_dict)
     
     doc = SimpleDocTemplate(report_path, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -578,7 +800,7 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
     content = []
         
     # Title
-    content.append(Paragraph("VAPT Report", title_style))
+    content.append(Paragraph("ScanPulse Report", title_style))
     content.append(Spacer(1, 12))
 
     section_no = 1  # Dynamic section numbering
@@ -588,7 +810,7 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
     content.append(Paragraph(f"Date of Report: {datetime.now().strftime('%B %d, %Y')}", normal_style))
     content.append(Paragraph(f"Target IP: {target_ip}", normal_style))
     content.append(Paragraph(f"Target Hostname: {target_hostname if target_hostname else 'N/A'}", normal_style))
-    content.append(Paragraph("Scan Performed By: Automated Detection and Security Assessment (ADSA)", normal_style))
+    content.append(Paragraph("Scan Performed By: ScanPulse - Automated Detection and Security Assessment tool", normal_style))
     content.append(Paragraph("Purpose: Identify vulnerabilities and security issues in the target environment.", normal_style))
     content.append(Spacer(1, 12))
     section_no += 1
@@ -673,18 +895,23 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
                 "139": ("NetBIOS-SSN", "NetBIOS services should be restricted, and unused ports should be closed to avoid exposure to vulnerabilities."),
                 "445": ("Microsoft-DS", "Ensure that SMB services are secured with proper authentication and access controls."),
                 "3306": ("MySQL", "Ensure that the MySQL service is properly secured, and consider applying the latest patches and configurations to mitigate known vulnerabilities."),
-                "8080": ("HTTP", "Ensure the HTTP service is secure, apply patches, and consider using HTTPS."),
+                "8080": ("HTTP", "Ensure that the HTTP service is secure, apply patches, and consider using HTTPS."),
                 "1022": ("EXP2", "Check for any potential vulnerabilities associated with EXP2 services and ensure proper security measures are in place."),
                 "1023": ("NetVenueChat", "Ensure that any chat services are secured with proper authentication and are not exposed to unauthorized users."),
                 "1026": ("LSA-or-NTerm", "Ensure that LSA and NT Termination services are secured and access is restricted."),
                 "9898": ("Monkeycom", "Verify the security configuration of Monkeycom and ensure that it is not exposing sensitive information."),
-                "9080": ("GLRPC", "Ensure that GLRPC services are secured with proper authentication and access controls to prevent unauthorized access."),
+                "9080": ("GLRPC", "Ensure that GLRPC services are secured with proper authentication and access controls to prevent unauthorized access.")
             }
+
+            default_recommendation = "No specific recommendation available – please review the service configuration."
+
             for port, service in open_ports:
                 content.append(Paragraph(f"Port {port} ({service}):", title_local))
                 if port in open_ports_assessments:
                     _, recommendation = open_ports_assessments[port]
-                    content.append(Paragraph(f"Recommendation: {recommendation}", recommendation_local))
+                else:
+                    recommendation = default_recommendation
+                content.append(Paragraph(f"Recommendation: {recommendation}", recommendation_local))
         # If there are Nikto findings
         if nikto_findings:
             content.append(Paragraph(f"{section_no}.{subsec_counter} Web Application Security", section_heading_style))
@@ -692,15 +919,63 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
             vulnerability_details = {
                 "ETags": {
                     "description": "The server is leaking inode information via ETags.",
-                    "impact": "An attacker can gain insights into the file system.",
-                    "recommendation": ["Disable the use of ETags.", "Review and sanitize headers."]
+                    "impact": "An attacker can gain insights into the file system, potentially aiding further attacks.",
+                    "recommendation": [
+                        "Disable the use of ETags.",
+                        "Review and sanitize headers."
+                    ]
                 },
                 "X-Frame-Options": {
                     "description": "The X-Frame-Options header is not present.",
-                    "impact": "Users can be deceived into clicking on malicious elements.",
-                    "recommendation": ["Implement the X-Frame-Options header.", "Conduct regular security audits."]
+                    "impact": "This may allow clickjacking attacks, where an attacker deceives users into clicking on hidden or malicious elements.",
+                    "recommendation": [
+                        "Implement the X-Frame-Options header (preferably 'DENY' or 'SAMEORIGIN').",
+                        "Conduct regular security audits."
+                    ]
+                },
+                "Directory Listing": {
+                    "description": "The server is configured to allow directory listing.",
+                    "impact": "Sensitive files and directories may be exposed, aiding reconnaissance by attackers.",
+                    "recommendation": [
+                        "Disable directory listing in the server configuration.",
+                        "Ensure proper access controls on directories."
+                    ]
+                },
+                "Default Files": {
+                    "description": "Default or sample files (e.g., readme, test pages) are present.",
+                    "impact": "These files can disclose configuration details or sensitive information.",
+                    "recommendation": [
+                        "Remove or secure default/sample files.",
+                        "Review server documentation to disable unnecessary sample content."
+                    ]
+                },
+                "SSL/TLS Weaknesses": {
+                    "description": "The server uses outdated SSL/TLS protocols or weak ciphers.",
+                    "impact": "This can allow attackers to intercept or tamper with communications.",
+                    "recommendation": [
+                        "Upgrade to the latest secure protocols (e.g., TLS 1.2 or 1.3).",
+                        "Disable weak ciphers and ensure proper certificate configuration."
+                    ]
+                },
+                "Server Banner Disclosure": {
+                    "description": "The server discloses detailed banner information (e.g., software version).",
+                    "impact": "Attackers can use this information to identify known vulnerabilities associated with specific versions.",
+                    "recommendation": [
+                        "Suppress or modify banner information to reveal minimal details.",
+                        "Use a web application firewall (WAF) to hide or alter server responses."
+                    ]
+                },
+                "Cross-Site Scripting (XSS)": {
+                    "description": "Potential XSS vulnerabilities were identified on the web application.",
+                    "impact": "Attackers can inject malicious scripts, which may compromise user data or session integrity.",
+                    "recommendation": [
+                        "Sanitize all user inputs.",
+                        "Implement proper output encoding.",
+                        "Use Content Security Policy (CSP) headers."
+                    ]
                 }
             }
+
             styles_local = getSampleStyleSheet()
             normal_local = styles_local["Normal"]
             title_local = ParagraphStyle(name="TitleStyle", parent=styles_local["Normal"], fontSize=10, spaceAfter=2, textColor="black", fontName="Helvetica-Bold")
@@ -708,16 +983,21 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
             impact_local = ParagraphStyle(name="ImpactStyle", parent=styles_local["Normal"], fontSize=10, spaceAfter=2)
             recommendation_local = ParagraphStyle(name="RecommendationStyle", parent=styles_local["Normal"], fontSize=10, spaceAfter=2)
             for finding in nikto_findings:
-                if "ETags" in finding:
-                    details = vulnerability_details["ETags"]
-                elif "X-Frame-Options" in finding:
-                    details = vulnerability_details["X-Frame-Options"]
+                # Attempt to match the finding to one of our defined vulnerability keys
+                found_key = None
+                for key in vulnerability_details.keys():
+                    if key.lower() in finding.lower():
+                        found_key = key
+                        break
+                if found_key:
+                    details = vulnerability_details[found_key]
                 else:
                     details = {
                         "description": "No detailed information available.",
                         "impact": "N/A",
                         "recommendation": ["Further investigation is recommended."]
                     }
+                
                 content.append(Paragraph(f"Finding: {finding}", title_local))
                 content.append(Paragraph(f"Description: {details['description']}", description_local))
                 content.append(Paragraph(f"Impact: {details['impact']}", impact_local))
@@ -725,17 +1005,68 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
                 for rec in details["recommendation"]:
                     content.append(Paragraph(f"- {rec}", recommendation_local))
                 content.append(Paragraph(" ", section_heading_style))
+
         section_no += 1
 
-    # 4. Conclusion
+    # 4. Vulnerability Risk & Remediation Metrics Section 
+    content.append(Paragraph(f"{section_no}. Vulnerability Risk & Remediation Metrics", heading_style))
+    section_no += 1
+    content.append(Spacer(1, 12))
+    
+    # Check if we have any valid CVSS data (at least one entry is not None)
+    has_cvss_data = any(info is not None for info in cvss_data_dict.values())
+
+    if not has_cvss_data:
+        content.append(Paragraph("No known vulnerabilities were found for the scanned IP address. This could mean that the target is well-secured or that no vulnerabilities have been reported in our current data sources. Consider re-running the scan later if new vulnerabilities are published.", normal_style))
+        content.append(Spacer(1, 12))
+    else:
+        # Dynamically aggregate severity counts for the pie chart
+        severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        for info in cvss_data_dict.values():
+            if info is not None:
+                sev = info.get("baseSeverity", "INFO").upper()
+                if sev in severity_counts:
+                    severity_counts[sev] += 1
+                else:
+                    severity_counts[sev] = 1
+            else:
+                severity_counts["INFO"] += 1
+
+        # Create and add the pie chart
+        chart_drawing = create_severity_pie_chart(severity_counts)
+        content.append(chart_drawing)
+        content.append(Spacer(1, 12))
+
+        # List detailed CVSS information for each CVE
+        for cve, info in cvss_data_dict.items():
+            content.append(Paragraph(f"<b>{cve}</b>", heading_style))
+            if info is None:
+                content.append(Paragraph("No data available.", normal_style))
+            else:
+                bullet_items = [
+                    f"Base Score: {info.get('baseScore', 'N/A')}",
+                    f"Severity: {info.get('baseSeverity', 'N/A')}",
+                    f"Attack Vector: {info.get('attackVector', 'N/A')}",
+                    f"Privileges Required: {info.get('privilegesRequired', 'N/A')}",
+                    f"Confidentiality Impact: {info.get('confidentialityImpact', 'N/A')}",
+                    f"Integrity Impact: {info.get('integrityImpact', 'N/A')}",
+                    f"Description: {info.get('description', 'N/A')}",
+                    f"Remediation: {info.get('remediation', 'Vendor Remediation: Update to the latest version as per vendor advisory.')}"
+                ]
+                for item in bullet_items:
+                    content.append(Paragraph(f"• {item}", normal_style))
+            content.append(Spacer(1, 12))
+
+
+    # 5. Conclusion
     content.append(Paragraph(f"{section_no}. Conclusion", heading_style))
     content.append(Paragraph("This assessment highlights the key areas where the target system can be improved. Addressing the identified issues will enhance the security posture and reduce potential risks. Regular security assessments and best practices should be followed to maintain a secure environment.", normal_style))
     content.append(Spacer(1, 12))
     section_no += 1
 
-    content.append(PageBreak())
+    # content.append(PageBreak())
     
-    # 5. Appendices - dynamic based on available scan data
+    # 6. Appendices - dynamic based on available scan data
     tools_used = []
     references = []
     if run_nmap and os.path.exists(nmap_file):
@@ -759,224 +1090,14 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
             content.append(Paragraph(f"{section_no}.{subsec} References", section_heading_style))
             for ref in references:
                 content.append(Paragraph(ref, normal_style))
+            content.append(Paragraph("- NVD: https://nvd.nist.gov/", normal_style))
             content.append(Spacer(1, 12))
+
     else:
         # If no scan data available, simply add an empty Appendices section
         content.append(Paragraph(f"{section_no}. Appendices", heading_style))
-        content.append(Paragraph("No additional tools or references available.", normal_style))
+        content.append(Paragraph("- NVD: https://nvd.nist.gov/", normal_style))
         content.append(Spacer(1, 12))
-    
-    doc.build(content)
-    return report_path
-
-def generate_report1(output_dir, run_nmap, run_nikto, target_ip):
-    # """Enhanced report generation with more detailed structure for a specific target IP."""
-    # # Create a report file name that includes the target IP
-    # report_path = os.path.join("reports", f"scan_report_{target_ip.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
-    
-    # # Construct file paths for the scans based on target IP
-    # nmap_file = os.path.join(output_dir, f"nmap_output_{target_ip.replace('.', '_')}.xml")
-    # nikto_file = os.path.join(output_dir, f"nikto_output_{target_ip.replace('.', '_')}.xml")
-    """Enhanced report generation with more detailed structure for a specific target IP."""
-    # New file name format: hourminsec_ddmmyy_scan_report_ipaddress.pdf
-    report_path = os.path.join("reports", f"{datetime.now().strftime('%H%M%S_%d%m%y')}_scan_report_{target_ip.replace('.', '_')}.pdf")
-    
-    nmap_file = os.path.join(output_dir, f"nmap_output_{target_ip.replace('.', '_')}.xml")
-    nikto_file = os.path.join(output_dir, f"nikto_output_{target_ip.replace('.', '_')}.xml")
-    
-    (open_ports,
-     filtered_ports,
-     host_status,
-     mysql_version_detected,
-     target_hostname,
-     parsed_target_ip,
-     start_time,
-     end_time,
-     total_ports_scanned) = parse_nmap_results(nmap_file)
-    
-    nikto_findings = parse_nikto_results(nikto_file)
-    save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings)
-    
-    doc = SimpleDocTemplate(report_path, pagesize=letter)
-    styles = getSampleStyleSheet()
-    
-    # Custom Styles
-    title_style = styles["Title"]
-    heading_style = styles["Heading1"]
-    normal_style = styles["Normal"]
-    section_heading_style = ParagraphStyle("SectionHeading", parent=styles["Heading2"], spaceAfter=12, fontSize=14)
-    
-    content = []
-    
-    # Title
-    content.append(Paragraph("VAPT Report", title_style))
-    content.append(Spacer(1, 12))
-    
-    # Introduction
-    content.append(Paragraph("1. Introduction", heading_style))
-    content.append(Paragraph(f"Date of Report: {datetime.now().strftime('%B %d, %Y')}", normal_style))
-    content.append(Paragraph(f"Target Hostname: {target_hostname}", normal_style))
-    content.append(Paragraph(f"Target IP: {target_ip}", normal_style))
-    content.append(Paragraph("Scan Performed By: Automated Detection and Security Assessment (ADSA)", normal_style))
-    content.append(Paragraph("Purpose: Identify vulnerabilities and security issues in the target environment.", normal_style))
-    content.append(Spacer(1, 12))
-    
-    # Scan Summary
-    content.append(Paragraph("2. Scan Summary", heading_style))
-    content.append(Paragraph("2.1 Nmap Scan Summary", section_heading_style))
-    content.append(Paragraph(f"Scan Start Time: {start_time}", normal_style))
-    content.append(Paragraph(f"Scan End Time: {end_time}", normal_style))
-    content.append(Paragraph(f"Total Ports Scanned: {total_ports_scanned}", normal_style))
-    
-    # Open Ports
-    if open_ports:
-        content.append(Paragraph("Open Ports:", normal_style))
-        table_data = [["Port Id", "Service Name"]] + [[port, service] for port, service in open_ports]
-        table = Table(table_data, colWidths=[doc.width / 3.0] * 2)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), "#f0f0f0"),
-            ("TEXTCOLOR", (0, 0), (-1, 0), "#000000"),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("GRID", (0, 0), (-1, -1), 1, "#d0d0d0"),
-        ]))
-        content.append(table)
-    
-    # Filtered Ports
-    if filtered_ports:
-        content.append(Paragraph("Filtered Ports:", normal_style))
-        table_data = [["Port Id", "Service Name"]] + [[port, service] for port, service in filtered_ports]
-        table = Table(table_data, colWidths=[doc.width / 3.0] * 2)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), "#f0f0f0"),
-            ("TEXTCOLOR", (0, 0), (-1, 0), "#000000"),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("GRID", (0, 0), (-1, -1), 1, "#d0d0d0"),
-        ]))
-        content.append(table)
-    
-    content.append(Paragraph(f"Host Status: {host_status}", normal_style))
-    
-    # Nikto scan summary
-    nikto_findings, start_time, target_ip, hostname, target_port, web_server, total_tests_run, elapsed_time = parse_nikto_results(nikto_file)
-    content.append(Paragraph("2.2 Nikto Scan Summary", section_heading_style))
-    content.append(Paragraph(f"Target IP: {target_ip}", normal_style))
-    content.append(Paragraph(f"Hostname: {hostname}", normal_style))
-    content.append(Paragraph(f"Target Port: {target_port}", normal_style))
-    content.append(Paragraph(f"Web Server: {web_server}", normal_style))
-    content.append(Paragraph(f"Scan Start Time: {start_time}", normal_style))
-    content.append(Paragraph(f"Number of Tests: {total_tests_run}", normal_style))
-    
-    if nikto_findings:
-        content.append(Paragraph("Findings:", normal_style))
-        table_data = [[finding] for finding in nikto_findings]
-        table = Table(table_data, colWidths=[doc.width])
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), "#f0f0f0"),
-            ("TEXTCOLOR", (0, 0), (-1, 0), "#000000"),
-            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("GRID", (0, 0), (-1, -1), 1, "#d0d0d0"),
-        ]))
-        content.append(table)
-    else:
-        content.append(Paragraph("No findings were reported.", normal_style))
-    
-    # Vulnerability Assessment Section
-    open_ports_assessments = {
-        "21": ("FTP", "Ensure that FTP is using secure configurations or replace with a secure alternative like SFTP."),
-        "22": ("SSH", "Ensure SSH is secured with strong passwords or key-based authentication and disable root login if not needed."),
-        "80": ("HTTP", "Ensure that the HTTP service is secure and consider using HTTPS for encrypted communication."),
-        "443": ("HTTPS", "Ensure HTTPS configuration uses strong encryption standards and secure certificates."),
-        "135": ("MSRPC", "Ensure that proper access controls are in place for MSRPC services to prevent unauthorized access."),
-        "139": ("NetBIOS-SSN", "NetBIOS services should be restricted, and unused ports should be closed to avoid exposure to vulnerabilities."),
-        "445": ("Microsoft-DS", "Ensure that SMB services are secured with proper authentication and access controls."),
-        "3306": ("MySQL", "Ensure that the MySQL service is properly secured, and consider applying the latest patches and configurations to mitigate known vulnerabilities."),
-        "8080": ("HTTP", "Ensure the HTTP service is secure, apply patches, and consider using HTTPS."),
-        "1022": ("EXP2", "Check for any potential vulnerabilities associated with EXP2 services and ensure proper security measures are in place."),
-        "1023": ("NetVenueChat", "Ensure that any chat services are secured with proper authentication and are not exposed to unauthorized users."),
-        "1026": ("LSA-or-NTerm", "Ensure that LSA and NT Termination services are secured and access is restricted."),
-        "9898": ("Monkeycom", "Verify the security configuration of Monkeycom and ensure that it is not exposing sensitive information."),
-        "9080": ("GLRPC", "Ensure that GLRPC services are secured with proper authentication and access controls to prevent unauthorized access."),
-    }
-    
-    content.append(Paragraph(" ", section_heading_style))
-    content.append(Paragraph("3. Vulnerability Assessment", heading_style))
-    section_counter = 1
-    
-    if open_ports:
-        content.append(Paragraph(f"3.{section_counter} Open Ports and Services", section_heading_style))
-        section_counter += 1
-        styles = getSampleStyleSheet()
-        normal_style = styles['Normal']
-        title_style = ParagraphStyle(name='TitleStyle', parent=styles['Normal'], fontSize=10, spaceAfter=2, textColor='black', fontName='Helvetica-Bold')
-        recommendation_style = ParagraphStyle(name='RecommendationStyle', parent=styles['Normal'], fontSize=10, spaceAfter=8)
-        for port, service in open_ports:
-            content.append(Paragraph(f"Port {port} ({service}):", title_style))
-            if port in open_ports_assessments:
-                service_name, recommendation = open_ports_assessments[port]
-                content.append(Paragraph(f"Recommendation: {recommendation}", recommendation_style))
-                
-    if filtered_ports:
-        content.append(Paragraph(f"3.{section_counter} Filtered Ports", section_heading_style))
-        content.append(Paragraph("Filtered ports may indicate that they are protected by a firewall or that the service is not responding to probes. Review security controls for these ports.", normal_style))
-        section_counter += 1
-    
-    vulnerability_details = {
-        "ETags": {
-            "description": "The server is leaking inode information via ETags.",
-            "impact": "An attacker can gain insights into the file system.",
-            "recommendation": ["Disable the use of ETags.", "Review and sanitize headers."]
-        },
-        "X-Frame-Options": {
-            "description": "The X-Frame-Options header is not present.",
-            "impact": "Users can be deceived into clicking on malicious elements.",
-            "recommendation": ["Implement the X-Frame-Options header.", "Conduct regular security audits."]
-        }
-    }
-    
-    if nikto_findings:
-        content.append(Paragraph(f"3.{section_counter} Web Application Security", section_heading_style))
-        section_counter += 1
-        styles = getSampleStyleSheet()
-        normal_style = styles['Normal']
-        title_style = ParagraphStyle(name='TitleStyle', parent=styles['Normal'], fontSize=10, spaceAfter=2, textColor='black', fontName='Helvetica-Bold')
-        description_style = ParagraphStyle(name='DescriptionStyle', parent=styles['Normal'], fontSize=10, spaceAfter=2)
-        impact_style = ParagraphStyle(name='ImpactStyle', parent=styles['Normal'], fontSize=10, spaceAfter=2)
-        recommendation_style = ParagraphStyle(name='RecommendationStyle', parent=styles['Normal'], fontSize=10, spaceAfter=2)
-        for finding in nikto_findings:
-            if "ETags" in finding:
-                details = vulnerability_details["ETags"]
-            elif "X-Frame-Options" in finding:
-                details = vulnerability_details["X-Frame-Options"]
-            else:
-                details = {
-                    "description": "No detailed information available.",
-                    "impact": "N/A",
-                    "recommendation": ["Further investigation is recommended."]
-                }
-            content.append(Paragraph(f"Finding: {finding}", title_style))
-            content.append(Paragraph(f"Description: {details['description']}", description_style))
-            content.append(Paragraph(f"Impact: {details['impact']}", impact_style))
-            content.append(Paragraph("Recommendations:", normal_style))
-            for recommendation in details["recommendation"]:
-                content.append(Paragraph(f"- {recommendation}", recommendation_style))
-            content.append(Paragraph(" ", section_heading_style))
-    
-    content.append(Paragraph(" ", section_heading_style))
-    content.append(Paragraph("4. Conclusion", heading_style))
-    content.append(Paragraph("This assessment highlights the key areas where the target system can be improved. Addressing the identified issues will enhance the security posture and reduce potential risks. Regular security assessments and best practices should be followed to maintain a secure environment.", normal_style))
-    
-    content.append(Paragraph(" ", section_heading_style))
-    content.append(Paragraph("5. Appendices", heading_style))
-    content.append(Paragraph("5.1 Tools Used", section_heading_style))
-    content.append(Paragraph("- Nmap: Network scanner for identifying open ports and services.", normal_style))
-    content.append(Paragraph("- Nikto: Web server scanner for identifying common vulnerabilities and misconfigurations.", normal_style))
-    
-    content.append(Paragraph("5.2 References", section_heading_style))
-    content.append(Paragraph("- Nmap Documentation: https://nmap.org/docs.html", normal_style))
-    content.append(Paragraph("- Nikto Documentation: https://cirt.net/Nikto2", normal_style))
     
     doc.build(content)
     return report_path
@@ -1053,6 +1174,7 @@ def create_trend_graphs(ip_details):
 
 # Main application
 def main():
+    st.set_page_config(page_title="ScanPulse")
     st.title("🛡️ Security Assessment Dashboard")
 
     tabs = st.tabs(["📊 Dashboard", "🔍 Scan Control", "📅 Scheduler", "📑 Reports","🌐 IP Details"])
@@ -1065,8 +1187,33 @@ def main():
 
         # Load IP details
         ip_details_raw = get_all_ip_scan_details()
+        # Initialize total vulnerabilities count
+        total_vulnerabilities = 0
 
-        st.metric("Total Scans", total_files, f"+{today_files}")
+        # Group scan details by IP address
+        ip_details_grouped = {}
+        for detail in ip_details_raw:
+            ip = detail['ip_address']
+            if ip not in ip_details_grouped:
+                ip_details_grouped[ip] = []
+            ip_details_grouped[ip].append(detail)
+
+            # Count vulnerabilities for this IP
+            severity_counts = detail.get("cvss_data", {}).get("severity_counts", {})
+            total_vulnerabilities += sum(severity_counts.values())
+
+
+        # st.metric("Total Scans", total_files, f"+{today_files}")
+        # st.metric("Total Vulnerabilities", total_vulnerabilities)
+        # Create two columns
+        col1, col2 = st.columns(2)
+
+        # Display metrics in separate columns
+        with col1:
+            st.metric("Total Scans", total_files, f"+{today_files}")
+
+        with col2:
+            st.metric("Total Vulnerabilities", total_vulnerabilities)
 
         if ip_details_raw:
             # Group scan details by IP address
@@ -1139,6 +1286,124 @@ def main():
             fig_vuln.update_xaxes(tickangle=45)
 
             st.plotly_chart(fig_vuln, use_container_width=True)
+        
+        # Fetch scan details
+        ip_details_raw = get_all_ip_scan_details()
+
+        if not ip_details_raw:
+            st.warning("No scan data available.")
+        else:
+            # Group scan details by IP address
+            ip_details_grouped = {}
+            for detail in ip_details_raw:
+                ip = detail['ip_address']
+                if ip not in ip_details_grouped:
+                    ip_details_grouped[ip] = []
+                ip_details_grouped[ip].append(detail)
+
+            # Create a DataFrame for total vulnerabilities count per IP, categorized by severity
+            data_vuln_severity = []
+            severity_levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+            for ip, details in ip_details_grouped.items():
+                if details:  # Ensure the IP has scan details
+                    latest_detail = details[-1]  # Get most recent scan
+                    severity_counts = latest_detail.get("cvss_data", {}).get("severity_counts", {})
+
+                    data_vuln_severity.append({
+                        "IP Address": ip,
+                        **{level: severity_counts.get(level, 0) for level in severity_levels}
+                    })
+
+            if data_vuln_severity:
+                df_vuln_severity = pd.DataFrame(data_vuln_severity)
+
+                # Create a Plotly Express stacked bar chart for total vulnerabilities
+                fig_vuln_severity = px.bar(
+                    df_vuln_severity, 
+                    x='IP Address', 
+                    y=severity_levels, 
+                    title="Total Vulnerabilities",
+                    labels={"IP Address": "IP Address", "value": "Number of Vulnerabilities", "variable": "Severity"},
+                    barmode="stack",
+                    color_discrete_map={"CRITICAL": "#ff0000", "HIGH": "#ff6600", 
+                                        "MEDIUM": "#ffcc00", "LOW": "#00cc00", "INFO": "#999999"}
+                )
+
+                fig_vuln_severity.update_layout(
+                    height=400,
+                    width=800,
+                    xaxis_title="IP Addresses",
+                    yaxis_title="Number of Vulnerabilities"
+                )
+                fig_vuln_severity.update_xaxes(tickangle=45)
+
+                # Display the graph
+                st.plotly_chart(fig_vuln_severity, use_container_width=True)
+            else:
+                st.info("No vulnerability data available.")
+        # Fetch scan details
+        # ip_details_raw = get_all_ip_scan_details()
+
+        # if not ip_details_raw:
+        #     st.warning("No scan data available.")
+        # else:
+        #     # Group scan details by IP address
+        #     ip_details_grouped = {}
+        #     for detail in ip_details_raw:
+        #         ip = detail['ip_address']
+        #         if ip not in ip_details_grouped:
+        #             ip_details_grouped[ip] = []
+        #         ip_details_grouped[ip].append(detail)
+
+        #     # Prepare data for the chart
+        #     data_vuln = []
+        #     severity_levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+        #     for ip, details in ip_details_grouped.items():
+        #         if details:  # Ensure the IP has scan details
+        #             latest_detail = details[-1]  # Get most recent scan
+        #             severity_counts = latest_detail.get("cvss_data", {}).get("severity_counts", {})
+        #             web_vuln_count = len(latest_detail.get("web_vulnerabilities", []))
+
+        #             # Append vulnerability data for this IP
+        #             data_vuln.append({
+        #                 "IP Address": ip,
+        #                 **{level: severity_counts.get(level, 0) for level in severity_levels},
+        #                 "Web Vulnerabilities": web_vuln_count
+        #             })
+
+        #     if data_vuln:
+        #         df_vuln = pd.DataFrame(data_vuln)
+
+        #         # Create a stacked bar chart for total vulnerabilities (CVSS + Web)
+        #         fig_vuln = px.bar(
+        #             df_vuln, 
+        #             x='IP Address', 
+        #             y=severity_levels + ["Web Vulnerabilities"], 
+        #             title="Total Vulnerabilities Per IP (By Severity & Web Vulnerabilities)",
+        #             labels={"IP Address": "IP Address", "value": "Number of Vulnerabilities", "variable": "Vulnerability Type"},
+        #             barmode="stack",
+        #             color_discrete_map={
+        #                 "CRITICAL": "#ff0000", "HIGH": "#ff6600", "MEDIUM": "#ffcc00",
+        #                 "LOW": "#00cc00", "INFO": "#999999", "Web Vulnerabilities": "#3366cc"
+        #             }
+        #         )
+
+        #         fig_vuln.update_layout(
+        #             height=400,
+        #             width=800,
+        #             xaxis_title="IP Addresses",
+        #             yaxis_title="Number of Vulnerabilities"
+        #         )
+        #         fig_vuln.update_xaxes(tickangle=45)
+
+        #         # Display the merged graph
+        #         st.plotly_chart(fig_vuln, use_container_width=True)
+        #     else:
+        #         st.info("No vulnerability data available.")
+
+           
 
 
         
@@ -1285,53 +1550,48 @@ def main():
         if ip_details:
             # Create tabs for each IP address
             ip_tabs = st.tabs([detail['ip_address'] for detail in ip_details])
-            
+
             for i, detail in enumerate(ip_details):
                 with ip_tabs[i]:
+                    # CVSS Severity Pie Chart
+                    if "cvss_data" in detail and "severity_counts" in detail["cvss_data"]:
+                        st.subheader("CVSS Severity Distribution")
+                        cvss_counts = detail["cvss_data"]["severity_counts"]
+                        df_pie = pd.DataFrame({
+                            "Severity": [level for level, count in cvss_counts.items() if count > 0],
+                            "Count": [count for count in cvss_counts.values() if count > 0]
+                        })
+                        
+                        if not df_pie.empty:
+                            color_map = {"CRITICAL": "#ff0000", "HIGH": "#ff6600", "MEDIUM": "#ffcc00", "LOW": "#00cc00", "INFO": "#999999"}
+                            overall_cvss = detail["cvss_data"].get("overall_vulnerability_level", "CVSS Severity Distribution")
+                            fig_pie = px.pie(df_pie, names="Severity", values="Count", color="Severity", color_discrete_map=color_map, title=f"Overall CVSS Level: {overall_cvss}")
+                            fig_pie.update_traces(textinfo='value')
+                            fig_pie.update_layout(showlegend=True)
+                            
+                            st.plotly_chart(fig_pie, use_container_width=True)
+                        else:
+                            st.info("No vulnerabilities found.")
+
                     # Open Ports Section
                     st.subheader("Open Ports")
-                    if detail['open_ports']:
+                    if detail.get('open_ports'):
                         open_ports_df = pd.DataFrame(detail['open_ports'])
-                        st.dataframe(open_ports_df, use_container_width=True,hide_index=True)
+                        st.dataframe(open_ports_df, use_container_width=True, hide_index=True)
                     else:
                         st.info("No open ports found")
-                    
+
                     # Filtered Ports Section
                     st.subheader("Filtered Ports")
-                    if detail['filtered_ports']:
+                    if detail.get('filtered_ports'):
                         filtered_ports_df = pd.DataFrame(detail['filtered_ports'])
-                        st.dataframe(filtered_ports_df, use_container_width=True,hide_index=True)
+                        st.dataframe(filtered_ports_df, use_container_width=True, hide_index=True)
                     else:
                         st.info("No filtered ports found")
-                    
-                    # # Web Vulnerabilities Section
-                    # st.subheader("Web Vulnerabilities")
-                    
-                    # # Extract only web vulnerabilities
-                    # web_vulns = []
-                    # if detail['web_vulnerabilities']:
-                    #     # Check if web_vulnerabilities is a list of lists or contains nested lists
-                    #     if isinstance(detail['web_vulnerabilities'], list):
-                    #         for item in detail['web_vulnerabilities']:
-                    #             if isinstance(item, list):
-                    #                 # If item is a list, extend web_vulns with its string elements
-                    #                 web_vulns.extend([str(v) for v in item if isinstance(v, str)])
-                    #             elif isinstance(item, str):
-                    #                 # If item is a string and looks like a vulnerability
-                    #                 web_vulns.append(item)
-                    
-                    # # Create DataFrame if web vulnerabilities exist
-                    # if web_vulns:
-                    #     vulnerabilities_df = pd.DataFrame({
-                    #         'Vulnerability': web_vulns
-                    #     })
-                    #     st.dataframe(vulnerabilities_df, use_container_width=True,hide_index=True)
-                    # else:
-                    #     st.info("No web vulnerabilities detected")
+
                     # Web Vulnerabilities Section
                     st.subheader("Web Vulnerabilities")
-                    if detail['web_vulnerabilities']:
-                        # Function to recursively flatten a list
+                    if detail.get('web_vulnerabilities'):
                         def flatten(lst):
                             flat = []
                             for item in lst:
@@ -1341,11 +1601,9 @@ def main():
                                     flat.append(item)
                             return flat
 
-                        # Flatten the vulnerabilities list and remove duplicates
                         web_vulns = flatten(detail['web_vulnerabilities'])
                         web_vulns = list(dict.fromkeys(web_vulns))
-                        
-                        # Create a DataFrame if there are vulnerabilities to display
+
                         if web_vulns:
                             vulnerabilities_df = pd.DataFrame({'Vulnerability': web_vulns})
                             st.dataframe(vulnerabilities_df, use_container_width=True, hide_index=True)
@@ -1353,6 +1611,9 @@ def main():
                             st.info("No web vulnerabilities detected")
                     else:
                         st.info("No web vulnerabilities detected")
+
+                    
+
 
 
 
