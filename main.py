@@ -20,9 +20,18 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import re
 import base64
+import math
+import time
+import concurrent.futures
+from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.lib import colors
 from dotenv import load_dotenv
 import requests
-import ipaddress
+import ipaddress 
+import socket
+import logging
+from urllib.parse import urlparse
 
 # Create necessary directories
 if not os.path.exists("reports"):
@@ -45,6 +54,69 @@ class ThreadSafeLogger:
 
 # Global logger
 logger = ThreadSafeLogger()
+
+def is_valid_ip(ip):
+    """Validate if input is a proper IPv4 address with octets in range 0-255."""
+    ip_pattern = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+    
+    if not ip_pattern.match(ip):
+        return False
+
+    # Ensure each octet is in the valid range (0-255)
+    octets = ip.split('.')
+    return all(0 <= int(octet) <= 255 for octet in octets)
+
+def resolve_domain(url):
+    """Resolve a URL to an IP address by extracting the domain."""
+    try:
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc if parsed_url.netloc else url  # Extract domain
+        ip_address = socket.gethostbyname(domain)
+        return ip_address
+    except socket.gaierror:
+        return None  # Invalid domain or unreachable host
+
+def resolve_ip_to_domain(ip_address):
+    try:
+        domain_name = socket.gethostbyaddr(ip_address)[0]
+        return domain_name
+    except socket.herror:
+        return ip_address
+
+def expand_cidr_network(cidr):
+    """Expand CIDR notation into a list of IP addresses."""
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+        return [str(ip) for ip in network.hosts()]
+    except ValueError:
+        return None  # Invalid CIDR
+
+def is_valid_cidr(cidr):
+    """Check if a given string is a valid CIDR notation."""
+    try:
+        ipaddress.ip_network(cidr, strict=False)
+        return True
+    except ValueError:
+        return False
+
+def process_targets(networks):
+    """Expand CIDR networks and validate individual IPs."""
+    valid_ips = []
+    
+    for target in networks:
+        target = target.strip()
+        
+        if is_valid_cidr(target):
+            # Expand CIDR range
+            expanded_ips = expand_cidr_network(target)
+            if expanded_ips:
+                valid_ips.extend(expanded_ips)
+        elif is_valid_ip(target):
+            valid_ips.append(target)
+        else:
+            print(f"Invalid target: {target}")
+    
+    return valid_ips
 
 def run_nmap_scan(network, output_dir):
     # Generate a file name that includes the target IP
@@ -519,9 +591,7 @@ def execute_scans1(networks, output_dir, run_nmap, run_nikto):
 
     return report_paths
 
-import math
-import time
-import concurrent.futures
+
 
 def execute_scans(networks, output_dir, run_nmap, run_nikto, batch_size=10):
     """
@@ -669,9 +739,7 @@ def extract_cves_nmap(xml_file):
         print(f"Error parsing Nmap XML: {e}")
     return list(cve_list)
 
-from reportlab.graphics.shapes import Drawing, Rect, String
-from reportlab.graphics.charts.piecharts import Pie
-from reportlab.lib import colors
+
 
 def create_severity_pie_chart(severity_counts):
     """
@@ -784,6 +852,7 @@ def generate_report(output_dir, run_nmap, run_nikto, target_ip):
     all_cves = extract_cves_nmap(nmap_file)
     # Build a CVSS data dictionary for each CVE
     cvss_data_dict = {cve: get_cvss_data(cve) for cve in all_cves}
+    target_hostname = resolve_ip_to_domain(target_ip)
 
     # Save IP details (even if empty)
     save_ip_details(target_ip, open_ports, filtered_ports, nikto_findings, cvss_data_dict)
@@ -1177,7 +1246,7 @@ def main():
     st.set_page_config(page_title="ScanPulse")
     st.title("🛡️ Security Assessment Dashboard")
 
-    tabs = st.tabs(["📊 Dashboard", "🔍 Scan Control", "📅 Scheduler", "📑 Reports","🌐 IP Details"])
+    tabs = st.tabs(["📊 Dashboard", "🔍 Instant Scan", "📅 Scheduler", "📑 Reports","🌐 IP Details"])
 
     # Dashboard Tab
     with tabs[0]:
@@ -1202,9 +1271,6 @@ def main():
             severity_counts = detail.get("cvss_data", {}).get("severity_counts", {})
             total_vulnerabilities += sum(severity_counts.values())
 
-
-        # st.metric("Total Scans", total_files, f"+{today_files}")
-        # st.metric("Total Vulnerabilities", total_vulnerabilities)
         # Create two columns
         col1, col2 = st.columns(2)
 
@@ -1342,76 +1408,43 @@ def main():
                 st.plotly_chart(fig_vuln_severity, use_container_width=True)
             else:
                 st.info("No vulnerability data available.")
-        # Fetch scan details
-        # ip_details_raw = get_all_ip_scan_details()
-
-        # if not ip_details_raw:
-        #     st.warning("No scan data available.")
-        # else:
-        #     # Group scan details by IP address
-        #     ip_details_grouped = {}
-        #     for detail in ip_details_raw:
-        #         ip = detail['ip_address']
-        #         if ip not in ip_details_grouped:
-        #             ip_details_grouped[ip] = []
-        #         ip_details_grouped[ip].append(detail)
-
-        #     # Prepare data for the chart
-        #     data_vuln = []
-        #     severity_levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-
-        #     for ip, details in ip_details_grouped.items():
-        #         if details:  # Ensure the IP has scan details
-        #             latest_detail = details[-1]  # Get most recent scan
-        #             severity_counts = latest_detail.get("cvss_data", {}).get("severity_counts", {})
-        #             web_vuln_count = len(latest_detail.get("web_vulnerabilities", []))
-
-        #             # Append vulnerability data for this IP
-        #             data_vuln.append({
-        #                 "IP Address": ip,
-        #                 **{level: severity_counts.get(level, 0) for level in severity_levels},
-        #                 "Web Vulnerabilities": web_vuln_count
-        #             })
-
-        #     if data_vuln:
-        #         df_vuln = pd.DataFrame(data_vuln)
-
-        #         # Create a stacked bar chart for total vulnerabilities (CVSS + Web)
-        #         fig_vuln = px.bar(
-        #             df_vuln, 
-        #             x='IP Address', 
-        #             y=severity_levels + ["Web Vulnerabilities"], 
-        #             title="Total Vulnerabilities Per IP (By Severity & Web Vulnerabilities)",
-        #             labels={"IP Address": "IP Address", "value": "Number of Vulnerabilities", "variable": "Vulnerability Type"},
-        #             barmode="stack",
-        #             color_discrete_map={
-        #                 "CRITICAL": "#ff0000", "HIGH": "#ff6600", "MEDIUM": "#ffcc00",
-        #                 "LOW": "#00cc00", "INFO": "#999999", "Web Vulnerabilities": "#3366cc"
-        #             }
-        #         )
-
-        #         fig_vuln.update_layout(
-        #             height=400,
-        #             width=800,
-        #             xaxis_title="IP Addresses",
-        #             yaxis_title="Number of Vulnerabilities"
-        #         )
-        #         fig_vuln.update_xaxes(tickangle=45)
-
-        #         # Display the merged graph
-        #         st.plotly_chart(fig_vuln, use_container_width=True)
-        #     else:
-        #         st.info("No vulnerability data available.")
-
+        
            
 
 
         
 
-    # Scan Control Tab
+    # Instant Scan Tab
     with tabs[1]:
-        st.header("Scan Control")
+        st.header("Instant Scan")
 
+        st.subheader("Resolve Domain to IP")
+        domain = st.text_input("Enter Domain Name", key="domain_input")
+
+        if st.button("Resolve Domain"):
+            if domain:
+                resolved_ip = resolve_domain(domain)
+                if resolved_ip:
+                    st.success(f"Resolved {domain} to {resolved_ip}")
+                else:
+                    st.error("Invalid domain or unreachable host")
+            else:
+                st.warning("Please enter a domain name")
+
+        # st.subheader("Resolve IP to Domain")
+        # ip_address = st.text_input("Enter IP Address", key="ip_input")
+
+        # if st.button("Resolve IP"):
+        #     if ip_address:
+        #         resolved_domain = resolve_ip_to_domain(ip_address)
+        #         if resolved_domain:
+        #             st.success(f"Resolved {ip_address} to {resolved_domain}")
+        #         else:
+        #             st.error("Invalid IP or no associated domain")
+        #     else:
+        #         st.warning("Please enter an IP address")
+
+        st.subheader("Start scan")
         network_input = st.text_area(
             "Target Networks/IPs (one per line)",
             help="Enter target IP addresses or networks (e.g., 192.168.1.1 or 192.168.1.0/24)"
@@ -1423,11 +1456,27 @@ def main():
         with col2:
             run_nikto = st.checkbox("Run Nikto Scan")
 
-       
+        # timeout_value = st.slider(
+        #     "Set scan timeout (seconds)", 
+        #     min_value=30, 
+        #     max_value=600, 
+        #     value=300, 
+        #     step=10
+        # )
+
         if st.button("Start Scan", type="primary", use_container_width=True):
             networks = [n.strip() for n in network_input.split('\n') if n.strip()]
+            valid_ips = process_targets(networks)
+            print(valid_ips)
+            if not valid_ips:
+                st.error("No valid IPs or networks provided.")
+                return
             if not networks:
                 st.error("Please enter at least one target network/IP.")
+                return
+            invalid_ips = [ip for ip in valid_ips if not is_valid_ip(ip)]
+            if invalid_ips:
+                st.error(f"Invalid IP(s) detected: {', '.join(invalid_ips)}")
                 return
             if not (run_nmap or run_nikto):
                 st.error("Please select at least one scan type.")
@@ -1441,7 +1490,9 @@ def main():
 
             try:
                 status_text.text("Starting parallel network scans...")
-                report_paths = execute_scans(networks, output_dir, run_nmap, run_nikto)
+                progress_bar.progress(15)
+                
+                report_paths = execute_scans(valid_ips, output_dir, run_nmap, run_nikto)
                 progress_bar.progress(75)
                 status_text.text("Scan and reporting completed successfully!")
                 progress_bar.progress(100)
